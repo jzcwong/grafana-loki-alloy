@@ -1,0 +1,8 @@
+# Filled-in copies of the Helm values (real account ID, bucket names, NLB hostname)
+*.local.yaml
+*.local.yml
+
+# macOS / Google Drive
+.DS_Store
+.tmp.driveupload/
+.tmp.drivedownload/

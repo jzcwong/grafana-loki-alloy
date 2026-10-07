@@ -1,0 +1,41 @@
+# Minimal Grafana on EKS with Loki (same cluster) as the default data source.
+#
+# Install:
+#   helm repo add grafana-community https://grafana-community.github.io/helm-charts && helm repo update
+#   helm install grafana grafana-community/grafana -n grafana --create-namespace -f grafana-eks.yaml
+
+# Provisioned at startup, so no manual data source setup in the UI
+datasources:
+  datasources.yaml:
+    apiVersion: 1
+    datasources:
+      - name: Loki
+        type: loki
+        uid: loki
+        access: proxy
+        # In-cluster gateway Service (port 80); no X-Scope-OrgID needed since Loki has auth_enabled: false
+        url: http://loki-gateway.loki.svc.cluster.local
+        isDefault: true
+        jsonData:
+          maxLines: 1000
+          timeout: 60
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    memory: 512Mi
+
+# Keeps saved dashboards across pod restarts (Spot nodes get replaced)
+persistence:
+  enabled: true
+  storageClassName: gp3 # created by storage-class.yaml; reclaimPolicy Retain, delete the EBS volume by hand
+  size: 2Gi
+
+# Access with kubectl port-forward; no load balancer for the POC
+service:
+  type: ClusterIP
+
+testFramework:
+  enabled: false

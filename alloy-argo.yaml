@@ -1,0 +1,109 @@
+# Grafana Alloy on demo-argo-cluster: tails pod logs on every node and pushes
+# them to Loki on demo-eks-cluster through its internal NLB (same VPC).
+#
+# Install:
+#   helm install alloy grafana/alloy -n alloy --create-namespace --version 1.13.0 -f alloy-argo.yaml
+
+controller:
+  type: daemonset # one Alloy pod per node, each reads only its own node's logs
+
+alloy:
+  mounts:
+    varlog: true # hostPath /var/log, where the kubelet writes /var/log/pods/*
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 512Mi
+
+  configMap:
+    create: true
+    content: |
+      logging {
+        level  = "info"
+        format = "logfmt"
+      }
+
+      // Only pods scheduled on this node; K8S_NODE_NAME is set by the chart
+      discovery.kubernetes "pods" {
+        role = "pod"
+        selectors {
+          role  = "pod"
+          field = "spec.nodeName=" + sys.env("K8S_NODE_NAME")
+        }
+      }
+
+      discovery.relabel "pod_logs" {
+        targets = discovery.kubernetes.pods.targets
+
+        // Skip pods that are not running (no log files being written)
+        rule {
+          source_labels = ["__meta_kubernetes_pod_phase"]
+          regex         = "Pending|Succeeded|Failed|Unknown"
+          action        = "drop"
+        }
+
+        rule {
+          source_labels = ["__meta_kubernetes_namespace"]
+          target_label  = "namespace"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_name"]
+          target_label  = "pod"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_container_name"]
+          target_label  = "container"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_label_app_kubernetes_io_name"]
+          target_label  = "app"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_node_name"]
+          target_label  = "node"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_namespace", "__meta_kubernetes_pod_container_name"]
+          separator     = "/"
+          target_label  = "job"
+        }
+
+        // /var/log/pods/<namespace>_<pod>_<uid>/<container>/<restart>.log
+        rule {
+          source_labels = ["__meta_kubernetes_pod_uid", "__meta_kubernetes_pod_container_name"]
+          separator     = "/"
+          target_label  = "__path__"
+          replacement   = "/var/log/pods/*$1/*.log"
+        }
+      }
+
+      local.file_match "pod_logs" {
+        path_targets = discovery.relabel.pod_logs.output
+      }
+
+      loki.source.file "pod_logs" {
+        targets    = local.file_match.pod_logs.targets
+        forward_to = [loki.process.pod_logs.receiver]
+      }
+
+      loki.process "pod_logs" {
+        // Strip the containerd CRI prefix (timestamp, stream, flags) and use its timestamp
+        stage.cri {}
+
+        forward_to = [loki.write.default.receiver]
+      }
+
+      loki.write "default" {
+        endpoint {
+          // Internal NLB in front of loki-gateway on demo-eks-cluster (see README step 2)
+          url = "http://<LOKI_NLB_HOSTNAME>/loki/api/v1/push"
+        }
+
+        // Distinguishes these logs from other clusters in Loki
+        external_labels = {
+          cluster = "demo-argo-cluster",
+        }
+      }

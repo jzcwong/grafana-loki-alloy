@@ -1,0 +1,129 @@
+# Loki monolithic (SingleBinary) deployment on AWS EKS backed by S3.
+#
+# Replace before installing:
+#   <ACCOUNT_ID>     - AWS account ID that owns the IAM role
+#   <CHUNKS_BUCKET>  - S3 bucket for chunks and the TSDB index
+#   <RULER_BUCKET>   - S3 bucket for ruler data
+#   us-west-2        - change if your S3 buckets are in another region, for example, us-east-1
+#
+# Install:
+#   helm repo add grafana https://grafana.github.io/helm-charts && helm repo update
+#   helm install loki grafana/loki -n loki --create-namespace -f loki-mono-aws.yaml
+
+loki:
+  auth_enabled: false # single tenant ("fake"); set true and send X-Scope-OrgID for multi-tenancy
+  commonConfig:
+    replication_factor: 1 # must be <= singleBinary.replicas
+  schemaConfig:
+    configs:
+      - from: "2024-04-01"
+        store: tsdb
+        object_store: s3
+        schema: v13
+        index:
+          prefix: loki_index_
+          period: 24h
+  ingester:
+    chunk_encoding: snappy
+  pattern_ingester:
+    enabled: true
+  limits_config:
+    allow_structured_metadata: true
+    volume_enabled: true
+    retention_period: 672h # 28 days retention
+  compactor:
+    retention_enabled: true
+    delete_request_store: s3
+  rulerConfig:
+    enable_api: true
+    # alertmanager_url: http://<alertmanager-host>:9093
+  querier:
+    max_concurrent: 4
+
+  # The chart renders this into common.storage (chunks/index) and ruler.storage
+  storage:
+    type: s3
+    bucketNames:
+      chunks: <CHUNKS_BUCKET>
+      ruler: <RULER_BUCKET>
+    s3:
+      region: us-west-2
+      # No keys here: credentials come from the IRSA role on the service account below
+      s3ForcePathStyle: false
+      insecure: false
+
+serviceAccount:
+  create: true
+  annotations:
+    "eks.amazonaws.com/role-arn": "arn:aws:iam::<ACCOUNT_ID>:role/demo-lk-role" # The service role you created
+
+deploymentMode: SingleBinary
+
+singleBinary:
+  replicas: 1 # pods use anti-affinity (one per node); raise with replication_factor when you add nodes
+  # Reserve memory so the scheduler accounts for Loki; query load from Grafana makes it grow
+  resources:
+    requests:
+      cpu: 250m
+      memory: 1Gi
+    limits:
+      memory: 2Gi
+  persistence:
+    enabled: true
+    storageClass: gp3 # created by storage-class.yaml; use gp2 if your cluster doesn't have gp3
+    accessModes:
+      - ReadWriteOnce
+    size: 30Gi
+
+# Chart default is 8192 MB (~9.8Gi pod request), which doesn't fit on t3.medium nodes
+chunksCache:
+  allocatedMemory: 1024
+
+# Internal NLB (created by EKS's built-in service controller) so other clusters in
+# demo-vpc can push to http://<nlb-dns-name>/loki/api/v1/push
+gateway:
+  service:
+    type: LoadBalancer
+    annotations:
+      service.beta.kubernetes.io/aws-load-balancer-type: nlb
+      service.beta.kubernetes.io/aws-load-balancer-internal: "true"
+      # Restricts the node security group rule for the NodePort; the chart doesn't
+      # render spec.loadBalancerSourceRanges for the gateway, so use the annotation
+      service.beta.kubernetes.io/load-balancer-source-ranges: 10.0.0.0/16 # demo-vpc CIDR
+
+# Disable minio storage
+minio:
+  enabled: false
+
+# Zero out replica counts of other deployment modes
+backend:
+  replicas: 0
+read:
+  replicas: 0
+write:
+  replicas: 0
+
+ingester:
+  replicas: 0
+querier:
+  replicas: 0
+queryFrontend:
+  replicas: 0
+queryScheduler:
+  replicas: 0
+distributor:
+  replicas: 0
+compactor:
+  replicas: 0
+indexGateway:
+  replicas: 0
+ruler:
+  replicas: 0
+patternIngester:
+  replicas: 0
+bloomPlanner:
+  replicas: 0
+bloomBuilder:
+  replicas: 0
+bloomGateway:
+  replicas: 0
